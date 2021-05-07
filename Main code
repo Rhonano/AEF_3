@@ -1,0 +1,181 @@
+library(tidyr)
+library(tidyverse)
+library(lubridate)
+library(tidyquant)
+library(Matrix)
+library(dplyr)
+library(purrr)
+
+set.seed(2021)
+
+setwd("/users/madsrefer/desktop/r projects/assignment 3")
+data <- load("data_mandatory_assignment_3.Rdata")
+
+##I prepare the data
+returns <- returns %>% 
+  select(-date) %>% 
+  as.matrix()
+
+ill <- amihud_measures %>% 
+  select(-ticker) %>% 
+  as.matrix() 
+
+B <- Diagonal(x=ill, n=length(ill)) %>% 
+  as.matrix()
+
+
+compute_ledoit_wolf <- function(x){
+  # Computes Ledoit-Wolf shrinkage covariance estimator
+  # This function generates the Ledoit-Wolf covariance estimator  as proposed in Ledoit, Wolf 2004 (Honey, I shrunk the sample covariance matrix.)
+  # X is a (t x n) matrix of returns
+  t <- nrow(x)
+  n <- ncol(x)
+  x <- apply(x, 2, function(x) if (is.numeric(x)) # demean x
+    x - mean(x) else x)
+  sample <- (1/t)*(t(x)%*%x)
+  var <- diag(sample)
+  sqrtvar <- sqrt(var)
+  rBar <- (sum(sum(sample/(sqrtvar %*% t(sqrtvar)))) - n)/(n * (n - 1))
+  prior <- rBar * sqrtvar %*% t(sqrtvar)
+  diag(prior) <- var
+  y <- x^2
+  phiMat <- t(y) %*% y/t - 2 * (t(x) %*% x) * sample/t + sample^2
+  phi <- sum(phiMat)
+  repmat = function(X, m, n) {
+    X <- as.matrix(X)
+    mx = dim(X)[1]
+    nx = dim(X)[2]
+    matrix(t(matrix(X, mx, nx * n)), mx * m, nx * n, byrow = T)
+  }
+  
+  term1 <- (t(x^3) %*% x)/t
+  help <- t(x) %*% x/t
+  helpDiag <- diag(help)
+  term2 <- repmat(helpDiag, 1, n) * sample
+  term3 <- help * repmat(var, 1, n)
+  term4 <- repmat(var, 1, n) * sample
+  thetaMat <- term1 - term2 - term3 + term4
+  diag(thetaMat) <- 0
+  rho <- sum(diag(phiMat)) + rBar * sum(sum(((1/sqrtvar) %*% t(sqrtvar)) * thetaMat))
+  
+  gamma <- sum(diag(t(sample - prior) %*% (sample - prior)))
+  kappa <- (phi - rho)/gamma
+  shrinkage <- max(0, min(1, kappa/t))
+  if (is.nan(shrinkage))
+    shrinkage <- 1
+  sigma <- shrinkage * prior + (1 - shrinkage) * sample
+  return(sigma)
+}
+gamma <- 4
+beta <- 1
+##function that computes optimal weights:
+optimal_tc_weight <- function(w_prev,
+                              mu, 
+                              Sigma, 
+                              beta = B * gamma, 
+                              gamma = 4,
+                              B=B){
+  N <- ncol(Sigma)
+  iota <- rep(1, N)
+  Sigma_star <- Sigma + B
+  mu_star <- mu + beta * B %*% w_prev
+  
+  Sigma_inv <- solve(Sigma_star)
+  
+  w_mvp <- Sigma_inv %*% iota
+  w_mvp <- w_mvp / sum(w_mvp)
+  w_opt <- w_mvp  + 1/gamma * (Sigma_inv - w_mvp %*% t(iota) %*% Sigma_inv) %*% mu_star
+  return(w_opt)
+}
+
+# Illustrate effect of Turnover penalization
+Sigma <- compute_ledoit_wolf(returns) %>% 
+  as.matrix()
+mu <- 0 * colMeans(returns) %>% 
+  as.matrix()
+
+beta_concentration <- function(beta=1){
+  return(sum((optimal_tc_weight(rep(1/N, N), mu, Sigma, beta = beta, gamma = 4,B) - rep(1/N, N))^2))
+}
+
+beta_effect <- tibble(beta = 20 * qexp((1:99)/100)) %>% 
+  mutate(concentration = map_dbl(beta, beta_concentration))
+
+beta_effect %>% 
+  ggplot(aes(x = beta, y = concentration)) + 
+  geom_line() +
+  labs(x = "Transaction cost parameter", 
+       y = "Rebalancing")
+# OOS experiment 
+window_length <- 250
+periods <- nrow(returns) - window_length # total number of out-of-sample periods
+
+beta <- 1 # Transaction costs
+oos_values <- matrix(NA, 
+                     nrow = periods, 
+                     ncol = 3) # A matrix to collect all returns
+colnames(oos_values) <- c("raw_return", "turnover", "net_return") # we implement 3 strategies
+
+all_values <- list(oos_values, 
+                   oos_values,
+                   oos_values)
+
+w_prev_1 <- w_prev_2 <- w_prev_3 <- rep(1/N ,N)
+
+for(i in 1:periods){ # Rolling window
+  
+  # Extract information
+  return_window <- returns[i : (i + window_length - 1),] # the last X returns available up to date t
+  
+  # Sample moments 
+  Sigma <- cov(return_window) 
+  mu <- 0 * colMeans(return_window)
+  
+  # Optimal TC robust portfolio
+  w_1 <- optimal_tc_weight(w_prev = w_prev_1, mu = mu, Sigma = Sigma, beta = beta, gamma = gamma, B=B)
+  # Evaluation
+  raw_return <- returns[i + window_length, ] %*% w_1
+  turnover <- sum((as.vector(w_1)-as.vector(w_prev_1))^2)
+  # Store realized returns
+  net_return <- raw_return - beta * turnover
+  all_values[[1]][i, ] <- c(raw_return, turnover, net_return)
+  #cat(round(c(100 * i/periods, raw_return, turnover, net_return), 2), "\n")
+  #Computes adjusted weights based on the weights and next period returns
+  w_prev_1 <- w_1 * as.vector(1 + returns[i + window_length, ] / 100)
+  w_prev_1 <- w_prev_1 / sum(as.vector(w_prev_1))
+  
+  # Naive Portfolio 
+  w_2 <- rep(1/N, N)
+  # Evaluation
+  raw_return <- returns[i + window_length, ] %*% w_2
+  turnover <- sum((as.vector(w_2)-as.vector(w_prev_2))^2)
+  # Store realized returns
+  net_return <- raw_return - beta * turnover
+  all_values[[2]][i, ] <- c(raw_return, turnover, net_return)
+  #Computes adjusted weights based on the weights and next period returns
+  w_prev_2 <- w_2 * as.vector(1 + returns[i + window_length, ] / 100)
+  w_prev_2 <- w_prev_2 / sum(as.vector(w_prev_2))
+  
+  # Mean-variance efficient portfolio
+  w_3 <- optimal_tc_weight(w_prev = w_prev_3, mu = mu, Sigma = Sigma, beta = 0, gamma = gamma, B=B)
+  # Evaluation
+  raw_return <- returns[i + window_length, ] %*% w_3
+  turnover <- sum((as.vector(w_3) - as.vector(w_prev_3))^2)
+  # Store realized returns
+  net_return <- raw_return - beta * turnover
+  all_values[[3]][i, ] <- c(raw_return, turnover, net_return)
+  #Computes adjusted weights based on the weights and next period returns
+  w_prev_3 <- w_3 * as.vector(1 + returns[i + window_length, ] / 100)
+  w_prev_3 <- w_prev_3 / sum(as.vector(w_prev_3))
+}
+all_values <- lapply(all_values, as_tibble) %>% bind_rows(.id = "strategy")
+all_values %>%
+  group_by(strategy) %>%
+  summarise(Mean = 250*mean(net_return),
+            SD = sqrt(250) * sd(net_return),
+            Sharpe = Mean/SD,
+            Turnover = 100 * mean(turnover)) %>%
+  mutate(strategy = case_when(strategy == 1 ~ "MV (TC)",
+                              strategy == 2 ~ "Naive", 
+                              strategy == 3 ~ "MV")) %>% 
+  knitr::kable(digits = 4)
