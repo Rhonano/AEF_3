@@ -1,141 +1,158 @@
+library(tidyr)
 library(tidyverse)
+library(lubridate)
 library(tidyquant)
-
-ticker <- tq_index("DOW") 
-
-prices <- tq_get(ticker %>% 
-                   filter(ticker!="DOW"), get = "stock.prices")
-returns <- prices %>% 
-  group_by(symbol) %>% 
-  mutate(log_price = log(adjusted),
-         return = 100 * (log_price - lag(log_price))) %>%   
-  select(ticker = symbol, date, return) %>%
-  na.omit() %>% 
-  mutate(return = return - mean(return))
-
+library(Matrix)
+library(dplyr)
+library(purrr)
+library(ggplot2)
 library(slider)
 
-rolling_sd <- returns %>% 
-  group_by(ticker) %>% 
-  mutate(rolling_sd = slide_dbl(return, sd, 
-                                .before = 100)) # 100 day estimation window
+set.seed(2021)
 
-rolling_sd %>% 
-  ggplot(aes(x=date, y = rolling_sd, color = ticker)) + 
-  geom_line() +
-  labs(x = "", y = "Standard deviation (rolling window") +
-  theme(legend.position = "bottom")
+setwd("/users/madsrefer/desktop/r projects/assignment 3")
+data <- load("data_mandatory_assignment_3.Rdata")
 
-ret <- returns %>% 
-  filter(ticker =="AAPL") %>% 
-  pull(return)
+##I prepare the data
+returns <- returns %>% 
+  select(-date) %>% 
+  as.matrix()
 
-logL <- function(params, p){
-  eps_sqr_lagged <- cbind(ret, 1)
-  for(i in 1:p){
-    eps_sqr_lagged <- cbind(eps_sqr_lagged, lag(ret, i)^2)
+returns <- returns/100
+
+ill <- amihud_measures %>% 
+  select(-ticker) %>% 
+  as.matrix() 
+
+B <- Diagonal(x=ill, n=length(ill)) %>% 
+  as.matrix()
+
+
+compute_ledoit_wolf <- function(x){
+  # Computes Ledoit-Wolf shrinkage covariance estimator
+  # This function generates the Ledoit-Wolf covariance estimator  as proposed in Ledoit, Wolf 2004 (Honey, I shrunk the sample covariance matrix.)
+  # X is a (t x n) matrix of returns
+  t <- nrow(x)
+  n <- ncol(x)
+  x <- apply(x, 2, function(x) if (is.numeric(x)) # demean x
+    x - mean(x) else x)
+  sample <- (1/t)*(t(x)%*%x)
+  var <- diag(sample)
+  sqrtvar <- sqrt(var)
+  rBar <- (sum(sum(sample/(sqrtvar %*% t(sqrtvar)))) - n)/(n * (n - 1))
+  prior <- rBar * sqrtvar %*% t(sqrtvar)
+  diag(prior) <- var
+  y <- x^2
+  phiMat <- t(y) %*% y/t - 2 * (t(x) %*% x) * sample/t + sample^2
+  phi <- sum(phiMat)
+  repmat = function(X, m, n) {
+    X <- as.matrix(X)
+    mx = dim(X)[1]
+    nx = dim(X)[2]
+    matrix(t(matrix(X, mx, nx * n)), mx * m, nx * n, byrow = T)
   }
-  eps_sqr_lagged <- na.omit(eps_sqr_lagged)
-  sigma <- eps_sqr_lagged[,-1] %*% params
-  0.5 * sum(log(sigma)) + 0.5 * sum(eps_sqr_lagged[,1]^2/sigma)
-}
-p <- 2
-initial_params <- (c(sd(ret), rep(1, p)))
-fit_manual <- optim(par = initial_params, 
-                    fn = logL, 
-                    hessian = TRUE, 
-                    method="L-BFGS-B", 
-                    lower = 0, 
-                    p = p)
-
-fitted_params <- (fit_manual$par)
-se <- sqrt(diag(solve(fit_manual$hessian)))
-
-cbind(fitted_params, se) %>% knitr::kable(digits = 2)
-cbind(fitted_params, se)
-
-library(tseries)
-summary(garch(ret,c(0,p)))
-
-# GARCH 
-
-garch_logL <- function(params, p, q, return_only_loglik = TRUE){
-  eps_sqr_lagged <- cbind(ret, 1)
-  for(i in 1:p){
-    eps_sqr_lagged <- cbind(eps_sqr_lagged, lag(ret, i)^2)
-  }
-  sigma.sqrd <- rep(sd(ret)^2, nrow(eps_sqr_lagged))
-  for(t in (1 + max(p, q)):nrow(eps_sqr_lagged)){
-    sigma.sqrd[t] <- params[1:(1+p)]%*% eps_sqr_lagged[t,-1] + 
-      params[(2+p):length(params)] %*% sigma.sqrd[(t-1):(t-q)]
-  }
-  sigma.sqrd <- sigma.sqrd[-(1:(max(p, q)))]
   
-  if(return_only_loglik){
-    0.5 * sum(log(sigma.sqrd)) + 0.5 * sum(eps_sqr_lagged[(1 + max(p, q)):nrow(eps_sqr_lagged),1]^2/sigma.sqrd)
-  }else{
-    return(sigma.sqrd)
-  }
+  term1 <- (t(x^3) %*% x)/t
+  help <- t(x) %*% x/t
+  helpDiag <- diag(help)
+  term2 <- repmat(helpDiag, 1, n) * sample
+  term3 <- help * repmat(var, 1, n)
+  term4 <- repmat(var, 1, n) * sample
+  thetaMat <- term1 - term2 - term3 + term4
+  diag(thetaMat) <- 0
+  rho <- sum(diag(phiMat)) + rBar * sum(sum(((1/sqrtvar) %*% t(sqrtvar)) * thetaMat))
+  
+  gamma <- sum(diag(t(sample - prior) %*% (sample - prior)))
+  kappa <- (phi - rho)/gamma
+  shrinkage <- max(0, min(1, kappa/t))
+  if (is.nan(shrinkage))
+    shrinkage <- 1
+  sigma <- shrinkage * prior + (1 - shrinkage) * sample
+  return(sigma)
+}
+gamma <- 4
+N <- ncol(Sigma)
+##function that computes optimal weights:
+optimal_tc_weight <- function(w_prev,
+                              mu, 
+                              Sigma, 
+                              beta = 0 , 
+                              gamma = 4,
+                              B){
+  N <- ncol(Sigma)
+  iota <- rep(1, N)
+  Sigma_star <- Sigma + beta / gamma * B
+  mu_star <- mu + beta * B %*% w_prev
+  
+  Sigma_inv <- solve(Sigma_star)
+  
+  w_mvp <- Sigma_inv %*% iota
+  w_mvp <- w_mvp / sum(w_mvp)
+  w_opt <- w_mvp  + 1/gamma * (Sigma_inv - w_mvp %*% t(iota) %*% Sigma_inv) %*% mu_star
+  return(w_opt)
 }
 
-p <- 1 # Lag structure 
-q <- 1 
-fit_garch_manual <- optim(par = rep(0.01, p + q + 1), 
-                          fn = garch_logL, 
-                          hessian = TRUE, 
-                          method="L-BFGS-B", 
-                          lower = 0, 
-                          p = p,
-                          q = q)
+# Illustrate effect of Turnover penalization
+Sigma <- compute_ledoit_wolf(returns) %>% 
+  as.matrix()
+mu <- 0 * colMeans(returns) %>% 
+  as.matrix()
 
-fitted_garch_params <- fit_garch_manual$par
-fitted_garch_params
+beta_concentration <- function(beta=1){
+  return(sum((optimal_tc_weight(rep(1/N, N), mu, Sigma, beta = beta, gamma = 4,B) - rep(1/N, N))^2))
+}
 
-tibble(vola = garch_logL(fitted_garch_params, p, q, FALSE)) %>% 
-  ggplot(aes(x = 1:length(vola), y = sqrt(vola))) +
+beta_effect <- tibble(beta = 20 * qexp((1:99)/100)) %>% 
+  mutate(concentration = map_dbl(beta, beta_concentration))
+
+beta_effect %>% 
+  ggplot(aes(x = beta, y = concentration)) + 
   geom_line() +
-  labs(x = "", y  = "GARCH(1,1) variance")
+  labs(x = "Transaction cost parameter", 
+       y = "Rebalancing")
+# OOS experiment 
+window_length <- 250
+periods <- nrow(returns) - window_length # total number of out-of-sample periods
 
-# Estimate ARCH(1) for all ticker
-uncond_var <- returns %>% 
-  arrange(ticker, date) %>% 
-  nest(data = c(date, return)) %>% 
-  mutate(arch = map(data, function(.x){
-    logL <- function(params, p){
-      eps_sqr_lagged <- cbind(ret, 1)
-      for(i in 1:p){
-        eps_sqr_lagged <- cbind(eps_sqr_lagged, lag(ret, i)^2)
-      }
-      eps_sqr_lagged <- na.omit(eps_sqr_lagged)
-      sigma <- eps_sqr_lagged[,-1] %*% params
-      0.5 * sum(log(sigma)) + 0.5 * sum(eps_sqr_lagged[,1]^2/sigma)
-    }
-    
-    ret <- .x %>% pull(return)    
-    p <- 2
-    initial_params <- (c(sd(ret), rep(1, p)))
-    fit_manual <- optim(par = initial_params, 
-                        fn = logL, 
-                        hessian = TRUE, 
-                        method="L-BFGS-B", 
-                        lower = 0, 
-                        p = p)
-    
-    fitted_params <- (fit_manual$par)
-    se <- sqrt(diag(solve(fit_manual$hessian)))
-    
-    return(tibble(param = c("intercept", paste0("alpha ", 1:p)), value = fitted_params, se = se))
-  })) %>% 
-  select(-data) %>% 
-  unnest(arch) %>%
-  group_by(ticker) %>% 
-  summarise(uncond_var = first(value) / (1 - sum(value) + first(value)))
+oos_values <- matrix(NA, 
+                     nrow = periods, 
+                     ncol = 3) # A matrix to collect all returns
+colnames(oos_values) <- c("raw_return", "turnover", "net_return") # we implement 3 strategies
 
-uncond_var %>% 
-  ggplot() + 
-  geom_bar(aes(x = reorder(ticker, uncond_var), 
-               y = uncond_var), stat = "identity") + 
-  coord_flip() +
-  labs(x = "Unconditional Variance", 
-       y = "")
+all_values <- list(oos_values, 
+                   oos_values,
+                   oos_values)
+
+w_prev_1 <- rep(1/N ,N)
+
+
+OOS_sharpe <- function(beta){
+for(i in 1:periods){ # Rolling window
+
+  # Extract information
+  return_window <- returns[i : (i + window_length - 1),] # the last X returns available up to date t
+  
+  # Sample moments 
+  Sigma <- cov(return_window) 
+  mu <- 0 * colMeans(return_window)
+  
+  # Optimal TC robust portfolio
+  w_1 <- optimal_tc_weight(w_prev = w_prev_1, mu = mu, Sigma = Sigma, beta = beta, gamma = gamma, B=B)
+  # Evaluation
+  raw_return <- returns[i + window_length, ] %*% w_1
+  turnover <- sum((as.vector(w_1)-as.vector(w_prev_1))^2)
+  # Store realized returns
+  net_return <- raw_return - beta * turnover 
+  all_values[[1]][i, ] <- c(raw_return, turnover, net_return)
+  #cat(round(c(100 * i/periods, raw_return, turnover, net_return), 2), "\n")
+  #Computes adjusted weights based on the weights and next period returns
+  w_prev_1 <- w_1 * as.vector(1 + returns[i + window_length, ] / 100)
+  w_prev_1 <- w_prev_1 / sum(as.vector(w_prev_1))
+  mean <- mean(net_return)
+  sd <- sd(net_return)
+  sharpe <- mean/sd
+  return(sharpe) 
+}
+}
+
 
