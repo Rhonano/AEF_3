@@ -1,0 +1,36 @@
+---
+title: "Transaction cost robust portfolio optimization"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+In this assignment we are doing an analysis in the spirit of the paper "Large-scale portfolio allocation under transaction costs and model uncertainty", Hautsch et al (2019). We implement different portfolio backtesting strategies and analyze the effect of transaction costs. We aim to show that transaction costs act as a shrinkage of the variance-covariance matrix and that it implies less rebalancing and putting more weight on the buy-and-hold strategy. 
+
+## Exercise 1
+
+The closed form solution can be derived as follows:
+
+$$\omega_{t+1}^{*}:=arg\max_{\omega\in R^{N},\iota'\omega=1}\omega'\mu-v_{t}(\omega,\omega_{t^{+}},\beta)-\frac{\gamma}{2}\omega'\Sigma\omega$$
+
+$$=\omega_{t+1}^{*}:=arg\max_{\omega\in R^{N},\iota'\omega=1}\omega'\mu-\frac{\beta}{2}(\omega-\omega_{t^{+}})'B(\omega-\omega_{t}^{+})-\frac{\gamma}{2}\omega'\Sigma\omega$$
+
+$$=\omega_{t+1}^{*}:=arg\max_{\omega\in R^{N},\iota'\omega=1}\omega'\mu-\frac{\beta}{2}\omega'B\omega+\beta\omega'B\omega_{t^{+}}-\frac{\beta}{2}\omega'_{t^{+}}B\omega_{t^{+}}-\frac{\gamma}{2}\omega'\Sigma\omega$$
+
+$$=\omega_{t+1}^{*}:=arg\max_{\omega\in R^{N},\iota'\omega=1}\omega'(\mu-\beta B\omega_{t^{+}})-\frac{\gamma}{2}\omega'(\Sigma+\frac{\beta}{\gamma}B)\omega$$
+$$=\omega_{t+1}^{*}:=arg\max_{\omega\in R^{N},\iota'\omega=1}\omega'\mu^{*}-\frac{\gamma}{2}\omega'\Sigma^{*}\omega$$
+
+where $\mu^{*}=\mu+\beta B\omega_{t^{+}}$ and $\Sigma^{*}=\Sigma+\frac{\beta}{\gamma}B$
+
+
+##Exercise 2
+Figure x shows the difference between the optimal weights under transaction costs, $\omega^*_{t+1}$, and the weights of the minimum variance portfolio $\omega(\Sigma)$. It is clear that in the long run, the difference for all the portfolio weights converge to 0 and we obtain convergence towards the efficient portfolio. 
+
+
+
+
+
+
+
