@@ -80,7 +80,7 @@ N <- ncol(Sigma)
 optimal_tc_weight <- function(w_prev,
                               mu, 
                               Sigma, 
-                              beta = 0 , 
+                              beta = 1 , 
                               gamma = 4,
                               B){
   N <- ncol(Sigma)
@@ -114,10 +114,25 @@ optimal_mvp_weight <- function(w_prev,
   
   return(w_opt)
 }
+w_next <- optimal_tc_weight(rep(1/N, N), mu, Sigma, beta = 1, gamma = 4,B)
+my_matrix <- matrix(ncol=5000, nrow=40)
+for(i in 1:5000){
+  w_next <- optimal_tc_weight(w_next, mu, Sigma, beta = 1, gamma = 4,B)
+  my_matrix[,i] <- w_next
+}
+
+w <- as.vector(w)
+convergence <- my_matrix-w
+matplot(t(convergence), type = "l", xlab="time", ylab="difference between")
+# Closed form solution 
+w <- solve(Sigma) %*% rep(1, ncol(Sigma))
+w <- w / sum(w)
+w
+
 # Illustrate effect of Turnover penalization
 
 
-beta_concentration <- function(beta=1){
+beta_concentration <- function(beta){
   return(sum((optimal_tc_weight(rep(1/N, N), mu, Sigma, beta = beta, gamma = 4,B) - rep(1/N, N))^2))
 }
 
