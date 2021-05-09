@@ -95,7 +95,25 @@ optimal_tc_weight <- function(w_prev,
   w_opt <- w_mvp  + 1/gamma * (Sigma_inv - w_mvp %*% t(iota) %*% Sigma_inv) %*% mu_star
   return(w_opt)
 }
-
+# MVP weights without TC
+optimal_mvp_weight <- function(w_prev,
+                               mu, 
+                               Sigma, 
+                               beta = 0 , 
+                               gamma = 4){
+  N <- ncol(Sigma) # columns
+  iota <- rep(1, N) # indicator function
+  Sigma_star <- Sigma + beta / gamma * diag(N) # as without illiquidity
+  mu_star <- mu + beta * w_prev
+  
+  Sigma_inv <- solve(Sigma_star) # invert variance-covariance matrix
+  
+  w_mvp <- Sigma_inv %*% iota  # turning weights into N x 1 matrix
+  w_mvp <- w_mvp / sum(w_mvp)  # weights must sum to 1
+  w_opt <- w_mvp  + 1/gamma * (Sigma_inv - w_mvp %*% t(iota) %*% Sigma_inv) %*% mu_star
+  
+  return(w_opt)
+}
 # Illustrate effect of Turnover penalization
 
 
@@ -136,12 +154,12 @@ for(i in 1:periods){ # Rolling window
   mu <- 0 * colMeans(return_window)
   
   # Optimal TC robust portfolio
-  w_1 <- optimal_tc_weight(w_prev = w_prev_1, mu = mu, Sigma = Sigma, beta = beta, gamma = gamma, B=B)
+  w_1 <- optimal_tc_weight(w_prev = w_prev_1, mu = mu, Sigma = Sigma, beta = beta, gamma = gamma, B)
   # Evaluation
   raw_return <- returns[i + window_length, ] %*% w_1
-  turnover <- sum((as.vector(w_1)-as.vector(w_prev_1))^2)
+  turnover <- sum(B%*%(as.vector(w_1)-as.vector(w_prev_1))^2)
   # Store realized returns
-  net_return <- raw_return - beta * turnover 
+  net_return <- raw_return - beta/2 * turnover 
   all_values[[1]][i, ] <- c(raw_return, turnover, net_return)
   #cat(round(c(100 * i/periods, raw_return, turnover, net_return), 2), "\n")
   #Computes adjusted weights based on the weights and next period returns
@@ -161,7 +179,7 @@ for(i in 1:periods){ # Rolling window
     pull(Sharpe)
 
 }
-
+OOS_sharpe(1)
 # Define the effect of transaction costs on performance
 beta_values <-  seq(from = 1, to = 100, by = 1)
 
@@ -184,3 +202,82 @@ sharpe_plot <- oos_data %>%
   labs(x = "Beta Values", 
        y = "Annulized Sharpe Ratios")
 sharpe_plot
+
+###Exercise 4
+# OOS experiment 
+backtest <- function(x){
+window_length <- x
+
+oos_values <- matrix(NA, 
+                     nrow = periods, 
+                     ncol = 3) # A matrix to collect all returns
+colnames(oos_values) <- c("raw_return", "turnover", "net_return") # we implement 3 strategies
+
+all_values_2 <- list(oos_values, 
+                   oos_values,
+                   oos_values)
+
+w_prev_1 <- w_prev_2 <- w_prev_3 <- rep(1/N ,N)
+
+for(i in 1:periods){ # Rolling window
+  # Extract information
+  return_window <- returns[i : (i + window_length - 1),] # the last X returns available up to date t
+  
+  # Sample moments 
+  Sigma <- cov(return_window) 
+  mu <- 0 * colMeans(return_window)
+  
+  
+  beta <- 0.005
+  # Optimal TC robust portfolio
+  w_1 <- optimal_tc_weight(w_prev = w_prev_1, mu = mu, Sigma = Sigma, beta = 0.005, gamma = gamma, B)
+  # Evaluation
+  raw_return <- returns[i + window_length, ] %*% w_1
+  turnover <- sum(abs(as.vector(w_1)-as.vector(w_prev_1)))
+  # Store realized returns
+  net_return <- raw_return - beta * turnover 
+  all_values_2[[1]][i, ] <- c(raw_return, turnover, net_return)
+  #cat(round(c(100 * i/periods, raw_return, turnover, net_return), 2), "\n")
+  #Computes adjusted weights based on the weights and next period returns
+  w_prev_1 <- w_1 * as.vector(1 + returns[i + window_length, ] / 100)
+  w_prev_1 <- w_prev_1 / sum(as.vector(w_prev_1))
+  
+  # Naive Portfolio 
+  w_2 <- rep(1/N, N)
+  # Evaluation
+  raw_return <- returns[i + window_length, ] %*% w_2
+  turnover <- sum(abs(as.vector(w_2)-as.vector(w_prev_2)))
+  # Store realized returns
+  net_return <- raw_return - beta * turnover
+  all_values_2[[2]][i, ] <- c(raw_return, turnover, net_return)
+  #Computes adjusted weights based on the weights and next period returns
+  w_prev_2 <- w_2 * as.vector(1 + returns[i + window_length, ] / 100)
+  w_prev_2 <- w_prev_2 / sum(as.vector(w_prev_2))
+  
+  # Mean-variance efficient portfolio
+  w_3 <- optimal_mvp_weight(w_prev = w_prev_3, mu = mu, Sigma = Sigma, beta = 0, gamma = gamma)
+  # Evaluation
+  raw_return <- returns[i + window_length, ] %*% w_3
+  turnover <- sum(abs(as.vector(w_3) - as.vector(w_prev_3)))
+  # Store realized returns
+  net_return <- raw_return - beta * turnover
+  all_values_2[[3]][i, ] <- c(raw_return, turnover, net_return)
+  #Computes adjusted weights based on the weights and next period returns
+  w_prev_3 <- w_3 * as.vector(1 + returns[i + window_length, ] / 100)
+  w_prev_3 <- w_prev_3 / sum(as.vector(w_prev_3))
+}
+
+all_values_2 <- lapply(all_values_2, as_tibble) %>% bind_rows(.id = "strategy")
+
+results <- all_values_2 %>%
+  group_by(strategy) %>%
+  summarise(Mean = 250*mean(net_return),
+            SD = sqrt(250) * sd(net_return),
+            Sharpe = Mean/SD,
+            Turnover = 100 * mean(turnover)) %>%
+  mutate(strategy = case_when(strategy == 1 ~ "MV (TC)",
+                              strategy == 2 ~ "Naive", 
+                              strategy == 3 ~ "MV")) 
+return(results)
+}
+backtest(250)
