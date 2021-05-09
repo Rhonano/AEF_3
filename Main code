@@ -70,6 +70,10 @@ compute_ledoit_wolf <- function(x){
   sigma <- shrinkage * prior + (1 - shrinkage) * sample
   return(sigma)
 }
+Sigma <- compute_ledoit_wolf(returns) %>% 
+  as.matrix()
+mu <- 0 * colMeans(returns) %>% 
+  as.matrix()
 gamma <- 4
 N <- ncol(Sigma)
 ##function that computes optimal weights:
@@ -93,10 +97,7 @@ optimal_tc_weight <- function(w_prev,
 }
 
 # Illustrate effect of Turnover penalization
-Sigma <- compute_ledoit_wolf(returns) %>% 
-  as.matrix()
-mu <- 0 * colMeans(returns) %>% 
-  as.matrix()
+
 
 beta_concentration <- function(beta=1){
   return(sum((optimal_tc_weight(rep(1/N, N), mu, Sigma, beta = beta, gamma = 4,B) - rep(1/N, N))^2))
@@ -119,9 +120,7 @@ oos_values <- matrix(NA,
                      ncol = 3) # A matrix to collect all returns
 colnames(oos_values) <- c("raw_return", "turnover", "net_return") # we implement 3 strategies
 
-all_values <- list(oos_values, 
-                   oos_values,
-                   oos_values)
+all_values <- list(oos_values)
 
 w_prev_1 <- rep(1/N ,N)
 
@@ -148,11 +147,40 @@ for(i in 1:periods){ # Rolling window
   #Computes adjusted weights based on the weights and next period returns
   w_prev_1 <- w_1 * as.vector(1 + returns[i + window_length, ] / 100)
   w_prev_1 <- w_prev_1 / sum(as.vector(w_prev_1))
-  mean <- mean(net_return)
-  sd <- sd(net_return)
-  sharpe <- mean/sd
-  return(sharpe) 
 }
+  all_values <- lapply(all_values, as_tibble) %>% bind_rows(.id = "strategy")
+  
+  all_values %>%
+    group_by(strategy) %>%
+    summarise(Mean = 250*mean(net_return),
+              SD = sqrt(250) * sd(net_return),
+              Sharpe = Mean/SD,
+              Turnover = 100 * mean(turnover)) %>%
+    mutate(strategy = case_when(strategy == 1 ~ "MV (TC)"
+                                )) %>% 
+    pull(Sharpe)
+
 }
 
+# Define the effect of transaction costs on performance
+beta_values <-  seq(from = 1, to = 100, by = 1)
 
+# Sharpe ratio for different values of beta
+sharpe_ratios <- matrix(0, length(beta_values), 3, dimnames =
+                          list(as.character(sort(beta_values)), c("MV TC", "Naive", "MV")))
+counter = 1
+
+# Loop over the sequence of feasible beta-values
+for (beta in seq_along(beta_values)){
+  output_temp <- OOS_sharpe(beta)
+  sharpe_ratios[counter, ] <- output_temp %>%as.matrix()
+  counter <- counter + 1
+}
+oos_data <- bind_cols(beta = beta_values,sharpe = sharpe_ratios[,1])
+
+sharpe_plot <- oos_data %>% 
+  ggplot(aes(x = beta, y = sharpe)) + 
+  geom_line() +
+  labs(x = "Beta Values", 
+       y = "Annulized Sharpe Ratios")
+sharpe_plot
