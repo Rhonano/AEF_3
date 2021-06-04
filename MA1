@@ -1,0 +1,488 @@
+
+---
+title: "MA1_final"
+author: "Emil Grønnegaard & Mads Refer"
+date: "5/18/2021"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+abstract: Based on Brandt (2010) we will analyze and evaluate finite-sample properties
+  of plug-in portfolio estimates based on portfolio sorts from Kenneth Frenchs data-library.
+  Furthermore, we will evaluate the reliability of mean-variance optimal portfolio
+  weights based on historical sample moments. We regard the sample moments as the
+  *true* moments, and then compare them to a simulated sample of returns. - write
+  more
+---
+
+```{r setup, include=FALSE}
+# BEFORE YOU RUN THIS CODE:
+# 1. Restart your current R session and clear your environment . 
+# 2. Clear workspace environment
+# 3. note that the RData objects rcov.RData.RData and sharpe_ratio_betas.RData were attached to this handin and should be stored in the same directory. We precomputed this data to save computation time.
+knitr::opts_chunk$set(echo = TRUE)
+# Load packages
+library(tidyverse)
+library(tidyquant)
+library(quadprog)
+library(matrixcalc)
+library(MASS)
+library(kableExtra)
+library(ggrepel)
+rm(list=ls())
+# kableExtra output settings
+options(knitr.table.format = 'latex', digits = 3)
+# Simulation seed for potential replication
+set.seed(1984) 
+# Plot printing
+plot_number <- T
+# Plot autosettings
+theme_set(
+  theme_minimal() +
+    theme(legend.position = "right")
+  )
+```
+
+
+# Exercise 1: Read the Data and Report Summary Statistics
+From the summary statistics in table (XXX) we observe that for all 10 portfolio sorts we have an equal amount of observations, and all exhibiting a positive mean return over the period. 
+
+In the *Sharpe-column*, the respective Sharpe-ratios (SR) are presented, assuming that the risk-free rate is zero:
+$$
+\text{Sharpe ratio} = \frac{\mu_P-r_f}{\sigma_P}\xrightarrow{}\frac{\mu_P}{\sigma_P},
+$$
+where $\mu_P$ denotes the respective portfolio mean-return, and $\sigma_P$ denotes the standard deviation of returns, or synonymously, the volatility. 
+
+The portfolio with the highest SR hereby yields the highest return for a given level of excess risk obtained by a given investor. From our portfolios, the highest SR is obtained historically by the *NoDur-portfolio* with a ratio of $0.21$. Conversely, the lowest SR is from the performance of the *Other-portfolio* with a ratio of $0.142$.
+
+The validity of the SR for evaluating future performance of a portfolio though relies highly on the assumptions of normally distributed returns. ?? 
+
+
+```{r data treatment}
+# Load data
+data_df <- read.csv('10_industry_portfolios.csv', skip = 11, header = T, as.is = T)
+# Generating a clean tibble
+data <- as_tibble(data_df) %>% #convert to tibble
+  rename(date=1) %>% # rename blank date column 
+  # clean nulls
+  filter(. != c(-99.99, -999)) %>% 
+  # convert date from int to date format
+  mutate( date = ymd(as.character(date), truncated = 1) ) %>%
+  # convert the row column into the row names of the tibble
+  column_to_rownames(var = 'date') 
+# Compute mean_returns and store for later usage as matrix
+mu_true <- data %>% colMeans() %>% as.matrix()
+# Compute sample variance-covariance matrix and store for late usage as amtrix
+sigma_true <- data %>% cov() %>% as.matrix() 
+# display Sharpe Ratio and summary statistics
+summary <- data %>% 
+  # Lengthen dataset and group by industry name
+  pivot_longer(everything()) %>% group_by(name) %>% 
+  # Compute summary statistics and Sharpe-ratio (assuming rf = 0)
+  summarise_at(vars(value), list(Mean = ~mean(.), 
+                                 Volatility = ~sd(.), 
+                                 Variance = ~var(.),
+                                 Sharpe = ~mean(.)/sd(.), 
+                                 Observations = ~length(.))) %>%
+  # Arrange by volatility
+  arrange(-Sharpe) 
+# Latex output for Sigma and summary statistics
+sigma_output <- knitr::kable(sigma_true, booktabs = TRUE)   
+summary_output <- knitr::kable(summary, booktabs = TRUE) 
+summary
+```
+
+
+
+# Exercise 2: Computing the Efficient Frontier of the Portfolio Sorts
+The following function is designed to solve the miminum-variance problem for a given set of assets. Furthermore, it utilizes the two-mutual-fund theorem to plot all possible return-volatility efficient portfolios, also referred to as the efficient frontier of asset allocation. The theorem states, that a given linear combination of two efficient portfolios yield another efficient portfolio. In practice, we identify a $(N\times 1)$ vector of $\omega$, where *N* is the number of assets, and $\omega$ is the weight vector.
+
+We solve the minimum variance problem, where the weights are given by a solution to:
+$$
+arg \min \omega'\Sigma\omega \\
+st. \omega'\iota = 1    
+$$
+In our particular case, we solve 
+$$
+arg \min \omega'\mu - \frac{\gamma}{2}\omega'\Sigma\omega \\
+st. \omega'\iota = 1,  
+$$
+where we consider the sample mean, $\mu$, and sample variance-covariance matrix, $\Sigma$ as the true population parameters.
+
+The code is a translation of the equivalence between certainty equivalent maximization and minimum variance optimization from exercise 2.4. Hence, the function depends on the arguments of $\mu$ and $Sigma$, as well as the target return, `ret_target`.
+
+```{r exercise 2}
+compute_efficient_frontier <- function(mu, sigma, ret_target = 2){ 
+  ## Inputs: mu, sigma, return target
+  ## Output: Mean-variance portfolios, with desired return multipliers (annualized)
+  N <- length(mu)
+  iota <- rep(1, N)
+  w_mvp <- solve(sigma) %*% iota
+  w_mvp <- w_mvp/sum(w_mvp)
+  
+  # Compute efficient portfolio weights for portfolios of 2 times expected mvp return
+  ## Based on AEF_1_slides 32-33
+  C <- as.numeric(t(iota)%*%solve(sigma)%*%iota)
+  D <- as.numeric(t(iota)%*%solve(sigma)%*%mu)
+  E <- as.numeric(t(mu)%*%solve(sigma)%*%mu)
+  
+  # Evaluate at true moments
+  mu_bar <- ret_target*t(w_mvp)%*%mu # Desired return 
+  lambda_tilde <- as.numeric(2*(mu_bar -D/C)/(E-D^2/C))  
+  w_eff <- w_mvp + lambda_tilde/2*(solve(sigma)%*%mu - D/C*solve(sigma)%*%iota)
+  
+  # The Two-Mutual Fund theorem, where 'c' is potential combinations of weights
+  c <- seq(from = -0.1, to = 1.2, by = 0.01)
+  output_data <- tibble(c = c, 
+                        mu = NA,     # Mean
+                        sd = NA,     # Vola
+                        sr = NA)     # Sharpe Ratio
+  # Looping through potential weights in the efficient frontier
+  for(i in seq_along(c)){
+    w_temp <- (1-c[i])*w_mvp + (c[i])*w_eff # Portfolio combination of MVP and ETP
+    # Evaluate using true moments
+    output_data$mu[i] <- t(w_temp) %*% mu_true # Expected return
+    output_data$sd[i] <- sqrt(t(w_temp) %*% sigma_true %*% w_temp) # Portfolio volatility
+  }
+  
+  # Compute Sharpe Ratios
+  output_data$sr <- output_data$mu / output_data$sd
+  
+  # Store results
+  results <- list("w_mvp" = w_mvp, "w_eff" = w_eff, "output_data" = output_data)
+  return(results)
+}
+```
+
+# Question 3: Visualize the Efficient Frontier 
+By calling the function `compute_efficient_frontier`$(\mu_{true},\sigma_{true})$ we plot all feasible efficient allocations, also referred to as the *efficient frontier*. By calling the function on the *true* parameters of $\mu$ and $\sigma$, we call the parameters which are also used to evaluate the performance, why we get the plot of the theoretical efficient frontier in a $(\sigma, \mu)$-space.
+```{r question 3}
+# Call efficient frontier 
+frontier_true <- compute_efficient_frontier(mu_true, sigma_true, 2) 
+# Visualizing the efficient frontier
+p1 <- ggplot(frontier_true[[3]], aes(x = sd, y = mu)) + 
+  geom_point() + ylim(0,2) + xlim(0,15) +# Plot all sd/mu portfolio combinations 
+  geom_point(data = frontier_true[[3]] %>% filter(c %in% c(0,1)), color = "blue",
+             size = 4) + # locate the mvp and efficient portfolio
+  geom_point(data = tibble(mu = mu_true, sd = sqrt(diag(sigma_true))), 
+             # Plot the individual assets / portfolio sorts
+             aes(y = mu, x  = sd), color = "green", size = 1) + 
+  geom_text_repel(data = frontier_true[[3]] %>% filter(c %in% c(0)),
+            aes(label = "MVP"), position = position_nudge(x = -0.1)) +
+  geom_text_repel(data = frontier_true[[3]] %>% filter(c %in% c(1)),
+            label = "ETP", position = position_nudge(y = -0.1)) +
+  labs(x = 'Volatility (sd)', y = 'Expected return (mu)')
+if (plot_number) p1
+# Store and export the efficient frontier plot
+ggsave("Efficient_frontier_true.png")
+# Export output data to LaTeX
+knitr::kable(frontier_true$output_data, booktabs = TRUE) 
+```
+
+From figure XXX we see, that the efficient frontier has the typical shape of an hyperbola, indicating diminishing return on risk. Hence, illustrating the benefits of diversification between the individual portfolios, which are plotted as the green dots within the efficient frontier. The individual asset portfolios can therefore never yield an efficient allocation in this particular asset space. A rational investor would therefore diversify between the industry portfolios, so the risk-return is efficient.
+
+Additionally, the minimum variance portfolio is identified at the global minimum on the frontier, and the efficient tangent portfolio where the Sharpe-ratio is maximized.
+
+# Question 4: Compute the ETP Weights
+In the Capital Asset Pricing Model, or CAPM, the *efficient tangent portfolio* is the feasible combination of assets that maximizes the Sharpe-ratio based on the efficient weights from the minimum-variance problem. The tangent portfolio is derived using any linear combination of the efficient portfolio and investment in the risk free asset. In theory, this allows the marginal investor to obtain any desired return, below the MVP or above the market portfolio. Hence, by either investing in the risk free asset directly or using it to lever up, by borrowing at the risk free rate.
+
+Naturally, this CML allocation is only possible under the assumption that the investor can allocate wealth to the risk free asset, in terms of unlimited borrowing and lending. Hereby, any portfolio on the efficient frontier (the hyperbola) by allocating wealth in both the risk-free asset and the space of risky assets. The capital market line therefore represents the efficient mean-variance frontier with unlimited access to the risk-free asset. The portfolio return is therefore similar to the mean-variance problem from earlier:
+$$
+\min_{\omega} var(r_p) = \omega'\Sigma\omega \\
+st. E[r_p] = \omega'\mu=\overline{\mu},
+$$
+
+where $r_p$ is the portfolio return, and $\overline{\mu}$ is the target return. The solution is given by:
+
+$$
+\omega^*_{tan}=\frac{\overline{\mu}}{\mu'\Sigma\mu}\times\Sigma^{-1}\mu,
+$$
+
+which we need to solve in the `capital_market_line` function.
+
+Assuming the the risk-free interest rate is zero, and utilizing the "true" parameters of $\mu$ and $\Sigma$, the sharpe ratio is calculated as:
+$$
+\widehat{w}_t= \frac{\Sigma^{-1}* (\mu-r_f)}{\iota'\Sigma^{-1}*(\mu-r_f)}
+=\frac{\Sigma^{-1}* \mu}{\iota'\Sigma^{-1}*\mu},
+$$
+
+where $\widehat{w}_t$ represents the weights in the efficient tangent portfolio, ${iota$ the identity matrix, and $r_f$ the risk free rate, and $\mu, \Sigma$ are the sample mean and variance-covariance matrix.
+```{r quesiton 4}
+# CML function based on mu, sigma, and the risk free rate
+capital_market_line <- function(mu, sigma, rf = 0){
+  mu <- as.vector(mu)
+  sigma <- as.matrix(sigma)
+  sigma_inv <- as.matrix(solve(sigma))
+  w_tan <- sigma_inv %*% (mu - rf) # tangency portfolio
+  w_tan <- as.vector(w_tan/sum(w_tan))	# normalize weights
+  mu_tan <- crossprod(w_tan,mu_true)
+  sd_tan <- sqrt(t(w_tan) %*% sigma_true %*% w_tan)
+  sr_tan <- mu_tan/sd_tan
+  etp <- list(
+		    "er" = as.vector(mu_tan),
+		    "sd" = as.vector(sd_tan),
+        "sr"= as.vector(sr_tan),
+		    "weights" = as.vector(w_tan))
+  
+  # Plotting 
+  c <- seq(from = -0.1, to = 2, by = 0.02)
+  cml_tib <- tibble(c = c, 
+                  mu = NA,
+                  sd = NA,
+                  sr = NA)
+  for(i in seq_along(c)){
+  w_tan_temp <- (1-c[i])*rf + (c[i])*w_tan # Portfolio of mvp and efficient portfolio
+  cml_tib$mu[i] <- t(w_tan_temp) %*% mu_true  # Portfolio expected return
+  cml_tib$sd[i] <- sqrt(t(w_tan_temp) %*% sigma_true %*% w_tan_temp) # Portfolio volatility
+  cml_tib$sr[i] <- as.vector(sr_tan)
+  }
+  return(list("ETP" = etp, "CML" = cml_tib))
+}
+# Compute and store CML with rf = 0 based on the true parameters
+cml_data <- capital_market_line(mu = mu_true, sigma = sigma_true, rf = 0)
+# Plot the CML
+p2 <- p1 +   
+  geom_line(data = cml_data[[2]], aes(x = sd, y = mu),
+            color="purple",
+            size=1,
+            linetype = "dashed") +
+  geom_point(data = cml_data[[2]] %>% filter(c %in% c(1)), 
+             color = "coral",
+             size = 2) + # locate tangency portfolio
+  geom_text_repel(data = cml_data[[2]] %>% filter(c %in% c(1)),
+            aes(label = "Tan"), position = position_nudge(y = 0.1, x = -1))
+if (plot_number) p2
+```
+
+
+Looking closer at the portfolio weight, we see that there indeed is short-selling in the tangent portfolio. In the asset space the efficient tangent portfolio shorts the *Manuf* portfolio with -13.7% and the *Other* portfolio with -57.8%.
+
+In one way you could argue that the portfolio is balanced as it consists of 10 portfolios and not 10 individual stocks so the risk of one portfolio plummeting to zero is very low. However, the tangent portfolio seems very focused on going long and short on *NoDur* and *Other* respectively. Furthermore, there seems to be four stocks (*Durbl*, *HiTec*, *Shops* and *Utils*) which have very low weights. In that way the portfolio is reliant on only a few industries. 
+
+One potential problem with implementing the portfolio in real life is the possibility of short-selling. First, it assumes that you have the access and the knowledge of short-selling which might be true for large institutions but less so for hobby-investors. Short-selling an asset also requires that someone is willing to lend it and that might not be the case for small stocks or portfolios. Even if you initiate a position by borrowing a stock there is still the risk that the lender recalls the stock at any time and you have to close your position. Second, it assumes that you can lend and borrow an unlimited amount at the risk-free rate. There exists treasury bills and government bonds with very low default risk so that you can lend at the risk-free rate, but borrowing requires more advanced techniques such as repurchase agreements which might not be possible for the common investor. 
+
+
+
+```{r portfolio weights}
+# Plot portfolio weights
+tan_w <- cml_data[[1]]$weights
+tan_w_tib <- cml_data[[1]]$weights %>% tibble() # pull and store tan weights
+rownames(tan_w_tib) <- row.names(mu_true) # add sorted portfolio names
+p3 <- ggplot(aes(x = row.names(tan_w_tib), 
+                 y = tan_w, 
+                 fill=row.names(tan_w_tib)), 
+                 data = tan_w_tib) +
+  geom_bar(stat = 'identity') +
+  labs(x = 'Portfolios', y = 'Weights', title = "Tangency Portfolio Weights", fill='Portfolios\n') +
+  scale_y_continuous(labels = scales::percent) 
+if (plot_number) p3
+# Defining the efficient tangent portfolio function
+# Extracting weight (c) of mvp of the tangency portfolio, i.e. the one with the largest SR
+# etp <- frontier_true[[3]]which(frontier_true[[3]]$sr == max(frontier_true[[3]]$sr))
+```
+
+Calculating the Sharpe ratio using $SR_{tan}=\frac{w'_{tan}\mu}{w'_{tan}\Sigma w_{tan}}$ we get a value of 0.248, which is, as expected, higher than every single-standing portfolio Sharpe ratio due to diversification gains. 
+
+```{r}
+#the sharpe ratio of the tangency portfolio
+tan_mean <- t(tan_w_tib)%*%mu_true
+tan_sd <- sqrt(t(as.matrix(tan_w_tib)) %*% sigma_true %*% as.matrix(tan_w_tib))
+tan_sharpe <- tan_mean/tan_sd
+tan_sharpe
+```
+
+
+# Question 5: Simulate Returns
+In alignment with the Jobson-Korkie Experiment (1980), we design a simulation function that simulates a return sample of 250 observations, from the normal distribution with the true moments. For each sample we compute the plug-in estimates of the efficient frontier, and evaluate against the true efficient frontier without short-sale constraints.
+
+In practice, we set the `seed-number` to 1984 to enable readers to replicate the exact simulated sequences. Then we generate the `simulate_returns` function which utilize the `mvrnorm` function from the `MASS` package.
+
+```{r question 5}
+# Defining function to simulate hypothetical return sample of sample size N
+simulate_returns <- function(N) {
+  return(mvrnorm(n = N, mu=mu_true, Sigma=sigma_true))
+}
+# Store simulated returns for T = 100
+rets_sim <- simulate_returns(N = 100)
+# Compute and store the simulated mu
+mu_sim <- colMeans(rets_sim)
+# Print the simulated Sigmg
+knitr::kable(mu_sim, 2)
+# Pull and store the simulated sigma
+sigma_sim <- cov(rets_sim)
+# Print the simulated Sigmg
+knitr::kable(sigma_sim, 2)
+```
+
+
+# Question 6: Simulate a Returns Series of T=100 Observations
+## Compute simulated mean-variance frontier
+## Evaluate the proximity to the "true" frontier
+
+Firstly, we draw one sample for $N = 100$. Secondly, we simulate the frontier using the `compute-efficient_frontier` function with the simulated plug-in estimates of $\mu$ and $\Sigma$. Thirdly, we plot the frontier and evaluate it against the true efficient frontier.
+
+```{r question 6.1}
+# Utilize efficient frontier function from Q3, with target return = 2:
+frontier_sim <- compute_efficient_frontier(mu_sim, sigma_sim, 2) 
+# Plotting to compare with true frontier (black)
+p4 <- ggplot() + 
+  geom_point(aes(x = sd, y = mu), frontier_true[[3]], 
+             color = "red", 
+             size = 0.5) + ylim(0,2) + xlim(0,15) + 
+  labs(x = 'Volatility (std)', y = 'Expected return (mean)') +
+  geom_point(aes(x = sd, y = mu), frontier_sim[[3]], 
+               color = "green",
+               size = 0.5) +
+  #geom_text_repel(data = frontier_true[[3]] %>% filter(c %in% c(0)),
+  #          aes(label = "MVP"),
+  #          position = position_nudge(x = -0.7)) +
+  #geom_text_repel(data = frontier_true[[3]] %>% filter(c %in% c(1)),
+  #          label = "ETP", 
+  #          position = position_nudge(y = -0.1)) +
+  #geom_text_repel(data = frontier_sim[[3]] %>% filter(c %in% c(0)),
+  #          aes(label = "MVP_sim"), 
+  #          position = position_nudge(y = -.1, x = -0.7)) +
+  #geom_text_repel(data = frontier_sim[[3]] %>% filter(c %in% c(1)),
+  #          label = "ETP_sim", 
+  #          position = position_nudge(y = -0.3, x = 2)) +
+  #geom_point(aes(x=sd,y=mu),frontier_sim, color = "green", size = 1)  +
+  theme_minimal()
+if (plot_number) p4
+```
+From figure XXX the difference between the simulated and true frontiers represents the lack of precission in plug-in estimates, is a clear illustration of the *economic loss* from Jobson-Korkie.
+
+# Question 7: Simulation Study
+
+To evaluate the performance of plug-in estimates, on a more general level, we extend the simulation study. In practice, we perform 250 repeats of the original simulation study, and plot the simulated frontiers respectively as well as the true frontier.
+
+```{r question 7}
+# Wrapping everything in a function to repeat steps from PART 1
+frontier <- function(sample) {
+  mu_sim <- apply(sample,2,function(x) mean(x))
+  sigma_sim <- cov(sample)
+  
+  # Store histogram of simulated returns
+  hist_sim <- qplot(sample, geom="histogram")
+  
+  # Only outputting the tibble
+  sim_results <- compute_efficient_frontier(mu = mu_sim, sigma = sigma_sim, ret_target = 2)[[3]]
+  return(sim_results)
+}
+# Drawing sample of returns 
+N <- 100
+sample <- simulate_returns(N)
+# Compute the simulated frontiers from the return sample
+new_frontier <- frontier(sample)[,c("mu","sd")]
+# Defining function to simulate and plot 250 efficient frontiers along with the true frontier
+plot_frontiers <- function(N) {
+  # Unique colors in R excluding white
+  R_colors <- colors()[-1]
+  # Initialize plot using true frontier
+  plot <- ggplot() + 
+    geom_point(aes(x = sd, y = mu), frontier_true[[3]], 
+                 color = "red", 
+                 size = 0.5) + ylim(0,2) + xlim(0,15) + 
+    labs(x = 'Volatility (std)', y = 'Expected return (mean)') +
+    theme_minimal()+
+      ggtitle(paste('N=',N))+
+      labs(x=NULL, y=NULL)+
+      theme(plot.title = element_text(hjust = 0.5))
+  # Simulating return samples and calculating efficient frontiers 250 times
+  for (i in 1:250) {
+    x <- frontier(simulate_returns(N))[,c("mu","sd")]
+    plot <- plot + geom_point(aes(x=sd,y=mu), x, 
+                              color = R_colors[i], 
+                              size = 0.1, 
+                              alpha = 0.15 )
+  }
+  # Returning ggplot2 object 
+  return(plot)
+}
+# p5 <- plot_frontiers(N)
+# if (plot_number) p5
+
+```
+
+```{r question 7}
+plot25 <- plot_frontiers(N = 25)
+plot50 <- plot_frontiers(N=50)
+plot100 <- plot_frontiers(N = 100)
+plot1133 <- plot_frontiers(N=1133)
+grid.arrange(plot25, plot50, plot100, plot1133, ncol=2, nrow=2)
+```
+
+From figure XXX we see that all simulated frontiers lie below the true efficient frontier represented by the bold red frontier, which indicates an economic loss from the plug-in estimation. The estimated portfolios inherit the errors from the estimated parameters which leads to a difference between the estimated and true portfolios. 
+
+
+Furthermore, we pull the distribution of the simulated Sharpe-ratios for later comparison, with the true distribution.
+
+
+# Question 8: Portfolio Performance
+```{r}
+# Defining function to calculate SRs of simulated tangent portfolios evaluated at true parameters mu and sigma
+portfolio_performance <- function(N) {
+  
+  # Simulate returns and calculate efficient frontier
+  sample <- simulate_returns(N)
+  res <- frontier(sample)
+  # Identify efficient tangent portfolio and extract Sharpe Ratio
+  SR <- res[which(res$sr==max(res$sr)),c("sr")]
+  return(SR)
+}
+  
+# Calculate Sharpe Ratios with N = 100
+SRs <- data.frame(SR1=rep(0,250),SR2=rep(0,250)) 
+for (i in 1:250) {
+  SRs[i,"SR1"] <- portfolio_performance(N)
+}
+  
+# Plot distribution of SRs along with SR based on true parameters (vertical line)
+p5 <- ggplot() +
+  geom_histogram(aes(x=SR1), SRs, color = "darkgreen", fill = "chartreuse1",
+                 bins = 30, 
+                 alpha = .7,
+                 show.legend = TRUE) + # virker ikke!?
+  geom_vline(aes(xintercept=cml_data[[1]]$sr),color="black", linetype="dashed", size=1) +
+  labs(x = "Sharpe-ratio", y = "Frequency")
+if (plot_number) p5
+# Increase N to 1133 and compare to N = 100
+for (i in 1:250) {
+  SRs[i,"SR2"] <- portfolio_performance(nrow(data))
+}
+# Plot the differences
+p6 <- p5 + geom_histogram(aes(x=SR2), SRs, color = "darkblue", fill = "cornflowerblue",
+                          bins = 30, 
+                          alpha = .6,
+                          show.legend = TRUE) # VIRKER IKKE!?
+if (plot_number) p6
+# Saving plots...
+#if (save_plots) {
+#  plots <- list(p1,p2,p3,p4,p5,p6)
+#  for (n in 1:length(plots)) {
+#    tiff(paste0("p",n,".tiff"), units="in", width=8, height=5, res=300)
+#    print(plots[[n]])
+#    dev.off()
+#  }
+#}
+```
+
+```{r}
+ggplot(SRs) +
+  geom_histogram(aes(x=SR1, color='SR1'),
+                 bins = 30, 
+                 alpha = .7) + 
+geom_histogram(aes(x=SR2, color='SR2'),
+                          bins = 30, 
+                          alpha = .6)+
+  
+  geom_vline(aes(xintercept=cml_data[[1]]$sr),color="black", linetype="dashed", size=1) +
+  labs(color='Type', x = "Sharpe-ratio", y = "Frequency")+
+  theme(legend.position = c(0, 1),legend.justification = c(0, 1))+
+    scale_color_manual(values = c("blue","red"))
+```
+
+# Question 9: Sharpe Histogram
+
+One way to reduce the plug-in errors is to put a constraint on short selling
+
+two other ways are shrinkage estimation and factor models. 
